@@ -1,202 +1,70 @@
 import streamlit as st
 import requests
+import pandas as pd
 import json
-import re
 
-st.title("ChatGPT Conversation Event Stream Inspector")
-st.write(
-    """
-This app extracts **search model queries** and **search result domains/URLs** 
-from a ChatGPT conversation.
+st.title("ChatGPT Conversation Analyzer (API Key)")
 
-**Important:** You need your ChatGPT **session token** to access the private API.
-"""
-)
+api_key = st.text_input("Enter your OpenAI API Key", type="password")
+conversation_url = st.text_input("Enter ChatGPT Conversation URL")
 
-st.markdown("""
-### How to get your ChatGPT session token:
-1. Open [ChatGPT](https://chat.openai.com/) in your browser and log in.
-2. Open Developer Tools:
-   - Chrome / Edge: `Ctrl+Shift+I` or `Cmd+Option+I` (Mac)
-   - Firefox: `F12`
-3. Go to `Application` / `Storage` → `Cookies` → select `https://chat.openai.com`
-4. Find the cookie named `__Secure-next-auth.session-token`
-5. Copy the **Value** of that cookie and paste it below.
-""")
-
-# -----------------------------
-# User Inputs
-# -----------------------------
-session_token = st.text_input("Paste your ChatGPT session token:", type="password")
-url = st.text_input("Paste ChatGPT conversation URL:")
-
-# -----------------------------
-# Helper functions
-# -----------------------------
-def extract_conversation_id(url: str):
-    """Extract conversation ID from https://chatgpt.com/c/<ID>"""
-    match = re.search(r"/c/([a-zA-Z0-9\-]+)", url)
-    return match.group(1) if match else None
-
-
-def fetch_eventstream(conversation_id: str, token: str):
-    """Fetch raw SSE event stream using session token."""
-    endpoint = f"https://chatgpt.com/backend-api/f/conversation/{conversation_id}"
-
+def fetch_conversation(url, api_key):
     headers = {
-        "Accept": "text/event-stream",
-        "User-Agent": "Mozilla/5.0",
-        "Cookie": f"__Secure-next-auth.session-token={token}",
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
     }
+    # Assuming the conversation ID is the last part of the URL
+    conversation_id = url.rstrip("/").split("/")[-1]
+    api_endpoint = f"https://api.openai.com/v1/conversations/{conversation_id}/events"
 
-    response = requests.get(endpoint, headers=headers, stream=True)
-
+    response = requests.get(api_endpoint, headers=headers)
     if response.status_code != 200:
-        st.error(f"Error fetching stream: {response.status_code}")
+        st.error(f"Failed to fetch conversation: {response.status_code}")
         return None
 
-    raw_text = ""
-    for chunk in response.iter_lines(decode_unicode=True):
-        if chunk:
-            raw_text += chunk + "\n"
+    return response.json()
 
-    return raw_text
+def parse_events(events):
+    queries, domains, urls, titles, snippets = [], [], [], [], []
 
+    for event in events.get("events", []):
+        delta = event.get("delta", {})
+        if "search_model_queries" in delta:
+            queries.append(delta["search_model_queries"])
+        if "domains" in delta:
+            domains.append(delta["domains"])
+        if "URLs" in delta:
+            urls.append(delta["URLs"])
+        if "titles" in delta:
+            titles.append(delta["titles"])
+        if "snippets" in delta:
+            snippets.append(delta["snippets"])
 
-def parse_sse(raw_text: str):
-    """Parse Server-Sent Events into structured objects."""
-    events = []
-    current = {"event": None, "data": ""}
+    df = pd.DataFrame({
+        "search_model_queries": queries if queries else [None],
+        "domains": domains if domains else [None],
+        "URLs": urls if urls else [None],
+        "titles": titles if titles else [None],
+        "snippets": snippets if snippets else [None],
+    })
+    return df
 
-    for line in raw_text.splitlines():
-        if line.startswith("event:"):
-            if current["event"] or current["data"]:
-                events.append(current)
-            current = {"event": line.replace("event:", "").strip(), "data": ""}
-
-        elif line.startswith("data:"):
-            current["data"] += line.replace("data:", "").strip()
-
-        elif line == "":
-            if current["event"] or current["data"]:
-                events.append(current)
-            current = {"event": None, "data": ""}
-
-    return events
-
-
-def extract_search_metadata(parsed_events):
-    search_queries = []
-    search_results = []
-
-    for ev in parsed_events:
-        if not ev["data"]:
-            continue
-
-        try:
-            payload = json.loads(ev["data"])
-        except:
-            continue
-
-        # -------- Path-based metadata --------
-        p = payload.get("p")
-        v = payload.get("v")
-
-        if p == "/message/metadata/search_model_queries":
-            if isinstance(v, list):
-                for item in v:
-                    search_queries.append(item)
-
-        if p == "/message/metadata/search_result_groups":
-            if isinstance(v, list):
-                for group in v:
-                    domain = group.get("domain")
-                    for entry in group.get("entries", []):
-                        search_results.append({
-                            "domain": domain,
-                            "url": entry.get("url"),
-                            "title": entry.get("title"),
-                            "snippet": entry.get("snippet")
-                        })
-
-        # -------- Delta events --------
-        if ev["event"] == "delta":
-            try:
-                message = payload["v"]["message"]
-                metadata = message.get("metadata", {})
-            except:
-                continue
-
-            # search_model_queries
-            if "search_model_queries" in metadata:
-                smq = metadata["search_model_queries"]
-                if isinstance(smq, dict) and "queries" in smq:
-                    for q in smq["queries"]:
-                        search_queries.append(q)
-
-            # search_result_groups
-            if "search_result_groups" in metadata:
-                srg = metadata["search_result_groups"]
-                if isinstance(srg, list):
-                    for group in srg:
-                        domain = group.get("domain")
-                        for entry in group.get("entries", []):
-                            search_results.append({
-                                "domain": domain,
-                                "url": entry.get("url"),
-                                "title": entry.get("title"),
-                                "snippet": entry.get("snippet")
-                            })
-
-    return search_queries, search_results
-
-
-# -----------------------------
-# Run Extraction
-# -----------------------------
-if st.button("Process"):
-    if not session_token:
-        st.warning("Paste your ChatGPT session token first.")
-        st.stop()
-
-    if not url:
-        st.warning("Paste a conversation URL first.")
-        st.stop()
-
-    conv_id = extract_conversation_id(url)
-    if not conv_id:
-        st.error("Cannot extract conversation ID from URL.")
-        st.stop()
-
-    st.info(f"Conversation ID: {conv_id}")
-
-    with st.spinner("Fetching event stream..."):
-        raw = fetch_eventstream(conv_id, session_token)
-
-    if not raw:
-        st.error("Failed to load conversation event stream. Check your session token.")
-        st.stop()
-
-    st.success("Event stream loaded successfully.")
-
-    st.expander("Raw Event Stream").write(raw)
-
-    parsed = parse_sse(raw)
-    st.write(f"Parsed **{len(parsed)}** events.")
-
-    search_queries, search_results = extract_search_metadata(parsed)
-
-    # Display search queries
-    st.subheader("🔍 Search Model Queries")
-    if search_queries:
-        st.json(search_queries)
+if st.button("Fetch and Parse"):
+    if not api_key or not conversation_url:
+        st.warning("Please enter both API key and conversation URL")
     else:
-        st.write("None found.")
+        events = fetch_conversation(conversation_url, api_key)
+        if events:
+            df = parse_events(events)
+            st.subheader("Extracted Data")
+            st.dataframe(df)
 
-    # Display search results (domains, URLs)
-    st.subheader("🌐 Extracted Search Result Domains & URLs")
-    if search_results:
-        st.dataframe(search_results)
-    else:
-        st.write("None found.")
+            csv = df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Download CSV",
+                data=csv,
+                file_name="chatgpt_conversation_data.csv",
+                mime="text/csv"
+            )
+
 
