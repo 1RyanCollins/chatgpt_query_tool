@@ -1,70 +1,54 @@
 import streamlit as st
-import requests
-import pandas as pd
-import json
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from webdriver_manager.chrome import ChromeDriverManager
+import re
+import time
 
-st.title("ChatGPT Conversation Analyzer (API Key)")
+st.title("ChatGPT Conversation URL Scraper")
 
-api_key = st.text_input("Enter your OpenAI API Key", type="password")
-conversation_url = st.text_input("Enter ChatGPT Conversation URL")
+conversation_url = st.text_input("Enter ChatGPT conversation URL (https://chat.openai.com/c/...)")
 
-def fetch_conversation(url, api_key):
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-    # Assuming the conversation ID is the last part of the URL
-    conversation_id = url.rstrip("/").split("/")[-1]
-    api_endpoint = f"https://api.openai.com/v1/conversations/{conversation_id}/events"
+if conversation_url:
+    st.write("Scraping URLs... (make sure you are logged in in your browser!)")
+    
+    # Set up Selenium Chrome WebDriver
+    options = webdriver.ChromeOptions()
+    options.add_argument("--user-data-dir=selenium")  # Keeps your login session
+    options.add_argument("--headless")  # Set to False if you want to see the browser
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    
+    try:
+        driver.get(conversation_url)
+        time.sleep(5)  # Wait for page to load
 
-    response = requests.get(api_endpoint, headers=headers)
-    if response.status_code != 200:
-        st.error(f"Failed to fetch conversation: {response.status_code}")
-        return None
+        # Scroll down to load more messages if needed
+        for _ in range(3):
+            driver.execute_script("window.scrollBy(0, 1000);")
+            time.sleep(1)
 
-    return response.json()
+        # Extract all text elements in messages
+        messages = driver.find_elements(By.CSS_SELECTOR, "div[class*='group'] p")
+        text_content = " ".join([m.text for m in messages])
 
-def parse_events(events):
-    queries, domains, urls, titles, snippets = [], [], [], [], []
+        # Extract URLs
+        urls = re.findall(r"https?://[^\s]+", text_content)
 
-    for event in events.get("events", []):
-        delta = event.get("delta", {})
-        if "search_model_queries" in delta:
-            queries.append(delta["search_model_queries"])
-        if "domains" in delta:
-            domains.append(delta["domains"])
-        if "URLs" in delta:
-            urls.append(delta["URLs"])
-        if "titles" in delta:
-            titles.append(delta["titles"])
-        if "snippets" in delta:
-            snippets.append(delta["snippets"])
-
-    df = pd.DataFrame({
-        "search_model_queries": queries if queries else [None],
-        "domains": domains if domains else [None],
-        "URLs": urls if urls else [None],
-        "titles": titles if titles else [None],
-        "snippets": snippets if snippets else [None],
-    })
-    return df
-
-if st.button("Fetch and Parse"):
-    if not api_key or not conversation_url:
-        st.warning("Please enter both API key and conversation URL")
-    else:
-        events = fetch_conversation(conversation_url, api_key)
-        if events:
-            df = parse_events(events)
-            st.subheader("Extracted Data")
-            st.dataframe(df)
-
-            csv = df.to_csv(index=False).encode("utf-8")
+        if urls:
+            st.write(f"Found {len(urls)} URLs:")
+            for u in urls:
+                st.write(u)
+            
+            # Download button
             st.download_button(
-                "Download CSV",
-                data=csv,
-                file_name="chatgpt_conversation_data.csv",
-                mime="text/csv"
+                label="Download URLs as TXT",
+                data="\n".join(urls),
+                file_name="chatgpt_urls.txt",
+                mime="text/plain"
             )
-
+        else:
+            st.write("No URLs found.")
+    finally:
+        driver.quit()
 
