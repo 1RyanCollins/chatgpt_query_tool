@@ -1,33 +1,56 @@
 import streamlit as st
-from googlesearch import search
+import requests
+from bs4 import BeautifulSoup
 import re
+from urllib.parse import urlparse, parse_qs
 
-st.title("AI Overview Link Scraper (Google Search)")
+st.title("Google Search URL Scraper")
 
-query = st.text_input("Enter your search query (e.g., 'AI overview websites')")
+search_url = st.text_input("Enter a Google search URL:")
 
-num_results = st.slider("Number of Google results to fetch:", min_value=5, max_value=50, value=10)
-
-if query:
-    st.info(f"Fetching top {num_results} results for: {query}")
+if search_url:
+    st.info("Fetching Google search results...")
     
-    urls = []
-    for url in search(query, num_results=num_results, lang="en"):
-        urls.append(url)
-    
-    if urls:
-        st.subheader(f"Found {len(urls)} URLs:")
-        for u in urls:
-            st.write(u)
-        
-        # Download button
-        st.download_button(
-            label="Download URLs as TXT",
-            data="\n".join(urls),
-            file_name="ai_overview_links.txt",
-            mime="text/plain"
-        )
-    else:
-        st.warning("No URLs found.")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
+    }
+
+    try:
+        response = requests.get(search_url, headers=headers)
+        if response.status_code != 200:
+            st.error(f"Failed to fetch page. Status code: {response.status_code}")
+        else:
+            soup = BeautifulSoup(response.text, "html.parser")
+
+            # Extract URLs from <a> tags in search results
+            links = []
+            for a in soup.find_all("a", href=True):
+                href = a['href']
+                # Google search result URLs are usually in format "/url?q=<actual_url>&..."
+                if href.startswith("/url?q="):
+                    parsed_url = parse_qs(urlparse(href).query).get("q")
+                    if parsed_url:
+                        links.append(parsed_url[0])
+
+            # Remove duplicates
+            links = list(set(links))
+
+            if links:
+                st.subheader(f"Found {len(links)} URLs:")
+                for u in links:
+                    st.write(u)
+                
+                st.download_button(
+                    label="Download URLs as TXT",
+                    data="\n".join(links),
+                    file_name="google_search_links.txt",
+                    mime="text/plain"
+                )
+            else:
+                st.warning("No URLs found in this search page.")
+    except Exception as e:
+        st.error(f"Error: {e}")
+
 
 
